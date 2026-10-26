@@ -9,15 +9,16 @@ import { supabase } from "./supabase";
 
 type Status = "Idea" | "Production" | "In Review" | "Approved" | "Published";
 type Media = { id:string; url:string; name:string };
+type CommentItem = { id:string; author:string; body:string };
 type Post = {
   id:string; media:Media[]; caption:string; date:string; time:string;
-  status:Status; comments:string[]; assignee:string; kind:"post"|"carousel";
+  status:Status; comments:CommentItem[]; assignee:string; kind:"post"|"carousel";
 };
 
 const uid = () => Math.random().toString(36).slice(2,9);
 
 const starter: Post[] = [
-  {id:uid(),media:[{id:uid(),url:"https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=900&q=80",name:"product.jpg"}],caption:"Science and well-being in balance.",date:"2026-10-27",time:"13:00",status:"Approved",comments:["Visual approved for the feed."],assignee:"Lucas",kind:"post"},
+  {id:uid(),media:[{id:uid(),url:"https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=900&q=80",name:"product.jpg"}],caption:"Science and well-being in balance.",date:"2026-10-27",time:"13:00",status:"Approved",comments:[{id:uid(),author:"Lucas",body:"Visual approved for the feed."}],assignee:"Lucas",kind:"post"},
   {id:uid(),media:[{id:uid(),url:"https://images.unsplash.com/photo-1532187863486-abf9dbad1b69?auto=format&fit=crop&w=900&q=80",name:"lab.jpg"}],caption:"Formulations developed with care.",date:"2026-10-29",time:"18:00",status:"In Review",comments:[],assignee:"Bruna",kind:"post"},
   {id:uid(),media:[{id:uid(),url:"https://images.unsplash.com/photo-1544717305-2782549b5136?auto=format&fit=crop&w=900&q=80",name:"lifestyle.jpg"}],caption:"Routine, balance, and consistency.",date:"2026-10-31",time:"12:00",status:"Production",comments:[],assignee:"Katia",kind:"post"},
   {id:uid(),media:[{id:uid(),url:"https://images.unsplash.com/photo-1579154204601-01588f351e67?auto=format&fit=crop&w=900&q=80",name:"science.jpg"}],caption:"Knowledge behind every choice.",date:"2026-11-02",time:"19:30",status:"Idea",comments:[],assignee:"Lucas",kind:"post"},
@@ -56,6 +57,7 @@ function App(){
   const [layoutChoice,setLayoutChoice]=useState<"balanced"|"checkerboard"|"gradient">("balanced");
   const [uploadNotice,setUploadNotice]=useState("");
   const fileRef=useRef<HTMLInputElement>(null);
+  const carouselRef=useRef<HTMLInputElement>(null);
   const logoRef=useRef<HTMLInputElement>(null);
   const [phoneOpen,setPhoneOpen]=useState(false);
   const [cloudReady,setCloudReady]=useState(false);
@@ -80,11 +82,15 @@ function App(){
     if(mapped.length) setClient(mapped[0]);
 
     const {data:postRows}=await supabase.from("posts").select("*, post_media(*)").order("feed_position");
+    const {data:commentRows,error:commentsError}=await supabase.from("comments").select("*").order("created_at");
+    if(commentsError) console.error(commentsError);
+    const commentsByPost:Record<string,CommentItem[]>={};
+    (commentRows||[]).forEach((c:any)=>{(commentsByPost[c.post_id] ||= []).push({id:c.id,author:c.author_name||"Lucas",body:c.body||""});});
     const by:Record<string,Post[]>={};
     mapped.forEach(c=>by[c.id]=[]);
     (postRows||[]).forEach((r:any)=>{
       const media=(r.post_media||[]).sort((a:any,b:any)=>a.slide_position-b.slide_position).map((m:any)=>({id:m.id,url:m.public_url,name:m.file_name||""}));
-      const p:Post={id:r.id,media,caption:r.caption||"",date:r.scheduled_date||new Date().toISOString().slice(0,10),time:(r.scheduled_time||"12:00").slice(0,5),status:({idea:"Idea",production:"Production",in_review:"In Review",approved:"Approved",published:"Published"} as any)[r.status]||"Idea",comments:[],assignee:r.assignee||"",kind:r.post_type==="carousel"?"carousel":"post"};
+      const p:Post={id:r.id,media,caption:r.caption||"",date:r.scheduled_date||new Date().toISOString().slice(0,10),time:(r.scheduled_time||"12:00").slice(0,5),status:({idea:"Idea",production:"Production",in_review:"In Review",approved:"Approved",published:"Published"} as any)[r.status]||"Idea",comments:commentsByPost[r.id]||[],assignee:r.assignee||"",kind:r.post_type==="carousel"?"carousel":"post"};
       (by[r.client_id] ||= []).push(p);
     });
     setPostsByClient(by);
@@ -187,8 +193,31 @@ function App(){
     }catch(e){console.error(e);alert("Could not permanently delete this client. Check the browser console for details.");}
   };
 
-  const commit=(next:Post[])=>{ setHistory(h=>[...h.slice(-14),posts]); setPosts(next); };
-  const update=(p:Post)=>{ const n=posts.map(x=>x.id===p.id?p:x); setPosts(n); setSelected(p); };
+  const statusDb=(status:Status)=>({Idea:"idea",Production:"production","In Review":"in_review",Approved:"approved",Published:"published"} as const)[status];
+
+  const persistPosts=async(next:Post[])=>{
+    await Promise.all(next.map((p,i)=>supabase.from("posts").update({
+      caption:p.caption,post_type:p.kind,status:statusDb(p.status),assignee:p.assignee||null,
+      scheduled_date:p.date,scheduled_time:p.time,feed_position:i,updated_at:new Date().toISOString()
+    }).eq("id",p.id)));
+  };
+
+  const commit=(next:Post[])=>{
+    setHistory(h=>[...h.slice(-9),posts.map(p=>({...p,media:[...p.media],comments:[...p.comments]}))]);
+    setPosts(next);
+    void persistPosts(next);
+  };
+
+  const update=(p:Post)=>{
+    const previous=posts.find(x=>x.id===p.id);
+    if(previous && JSON.stringify(previous)!==JSON.stringify(p)){
+      setHistory(h=>[...h.slice(-9),posts.map(x=>({...x,media:[...x.media],comments:[...x.comments]}))]);
+    }
+    const n=posts.map(x=>x.id===p.id?p:x);
+    setPosts(n); setSelected(p);
+    void persistPosts(n);
+  };
+
   const remove=async(id:string)=>{
     const post=posts.find(p=>p.id===id);
     if(!post)return;
@@ -197,24 +226,72 @@ function App(){
       const {data:mediaRows,error:mediaReadError}=await supabase.from("post_media").select("storage_path").eq("post_id",id);
       if(mediaReadError) throw mediaReadError;
       const paths=(mediaRows||[]).map((m:any)=>m.storage_path).filter(Boolean);
-      if(paths.length){
-        const {error:storageError}=await supabase.storage.from("feed-media").remove(paths);
-        if(storageError) throw storageError;
-      }
-      const {error:mediaDeleteError}=await supabase.from("post_media").delete().eq("post_id",id);
-      if(mediaDeleteError) throw mediaDeleteError;
-      const {error:postDeleteError}=await supabase.from("posts").delete().eq("id",id);
-      if(postDeleteError) throw postDeleteError;
-      setPosts(posts.filter(p=>p.id!==id));
-      setSelected(null);
-      setHistory([]);
-    }catch(e){console.error(e);alert("Could not permanently delete this content. Check the browser console for details.");}
+      if(paths.length){const {error}=await supabase.storage.from("feed-media").remove(paths);if(error)throw error;}
+      await supabase.from("comments").delete().eq("post_id",id);
+      const {error:mediaDeleteError}=await supabase.from("post_media").delete().eq("post_id",id); if(mediaDeleteError)throw mediaDeleteError;
+      const {error:postDeleteError}=await supabase.from("posts").delete().eq("id",id); if(postDeleteError)throw postDeleteError;
+      setPosts(posts.filter(p=>p.id!==id));setSelected(null);setHistory([]);
+    }catch(e){console.error(e);alert("Could not permanently delete this content.");}
   };
-  const undo=()=>{const prev=history.at(-1); if(prev){setPosts(prev);setHistory(history.slice(0,-1));}}
+
+  const undo=async()=>{
+    const prev=history.at(-1); if(!prev)return;
+    setPosts(prev);setHistory(h=>h.slice(0,-1));
+    const currentSelected=selected;
+    if(currentSelected){const restored=prev.find(p=>p.id===currentSelected.id);setSelected(restored||null);}
+    try{await persistPosts(prev);}catch(e){console.error(e);alert("The layout was restored locally, but cloud sync failed.");}
+  };
+
+  const addComment=async(postId:string,author:string,body:string)=>{
+    const text=body.trim();if(!text)return;
+    const {data,error}=await supabase.from("comments").insert({post_id:postId,author_name:author,body:text}).select().single();
+    if(error){console.error(error);alert("Could not save comment.");return;}
+    const item:CommentItem={id:data.id,author:data.author_name,body:data.body};
+    const p=posts.find(x=>x.id===postId);if(!p)return;
+    const next={...p,comments:[...p.comments,item]};setPosts(posts.map(x=>x.id===postId?next:x));setSelected(next);
+  };
+
+  const deleteComment=async(postId:string,commentId:string)=>{
+    if(!window.confirm("Delete this comment permanently?"))return;
+    const {error}=await supabase.from("comments").delete().eq("id",commentId);
+    if(error){console.error(error);alert("Could not delete comment.");return;}
+    const p=posts.find(x=>x.id===postId);if(!p)return;
+    const next={...p,comments:p.comments.filter(c=>c.id!==commentId)};setPosts(posts.map(x=>x.id===postId?next:x));setSelected(next);
+  };
+
+  const addCarouselMedia=async(postId:string,fs:FileList|null)=>{
+    if(!fs?.length)return;
+    const p=posts.find(x=>x.id===postId);if(!p)return;
+    try{
+      const added:Media[]=[];
+      for(let i=0;i<fs.length;i++) added.push(await uploadMedia(fs[i],client.id,postId,p.media.length+i));
+      const next={...p,media:[...p.media,...added],kind:"carousel" as const};
+      await supabase.from("posts").update({post_type:"carousel",updated_at:new Date().toISOString()}).eq("id",postId);
+      setPosts(posts.map(x=>x.id===postId?next:x));setSelected(next);
+    }catch(e){console.error(e);alert("Could not add carousel images.");}
+  };
+
+  const deleteMedia=async(postId:string,mediaId:string)=>{
+    const p=posts.find(x=>x.id===postId);if(!p)return;
+    if(p.media.length<=1){alert("A post must keep at least one image. Delete the whole post instead.");return;}
+    if(!window.confirm("Delete this image permanently?"))return;
+    try{
+      const {data:row,error:readError}=await supabase.from("post_media").select("storage_path").eq("id",mediaId).single();
+      if(readError)throw readError;
+      if(row?.storage_path){const {error}=await supabase.storage.from("feed-media").remove([row.storage_path]);if(error)throw error;}
+      const {error}=await supabase.from("post_media").delete().eq("id",mediaId);if(error)throw error;
+      const remaining=p.media.filter(m=>m.id!==mediaId);
+      const kind=remaining.length>1?"carousel":"post";
+      await supabase.from("posts").update({post_type:kind}).eq("id",postId);
+      const next={...p,media:remaining,kind:kind as "post"|"carousel"};
+      setPosts(posts.map(x=>x.id===postId?next:x));setSelected(next);
+    }catch(e){console.error(e);alert("Could not delete this image.");}
+  };
 
   const addFiles=async(fs:FileList|null, carousel=false)=>{
     if(!fs || fs.length===0)return;
     const files=Array.from(fs);
+    if(carousel && files.length<2){alert("Select at least 2 images to create a carousel.");return;}
     try{
       if(carousel){
         const {data:p,error}=await supabase.from("posts").insert({client_id:client.id,caption:"",post_type:"carousel",status:"idea",scheduled_date:new Date().toISOString().slice(0,10),scheduled_time:"12:00",feed_position:posts.length}).select().single();
@@ -321,10 +398,12 @@ function App(){
 
     <main>
       <header>
-        <div><div className="eyebrow">CLIENT / SOCIAL MEDIA · V9 CLOUD</div><h1>{client.name}</h1><p>{client.handle} · Visual planning, multi-upload and cloud persistence</p></div>
+        <div><div className="eyebrow">CLIENT / SOCIAL MEDIA · V10 CLOUD</div><h1>{client.name}</h1><p>{client.handle} · Visual planning, multi-upload and cloud persistence</p></div>
         <div className="header-actions">
           <button className="ghost" onClick={undo} disabled={!history.length}><RotateCcw size={17}/> Undo</button>
           <button className="magic" onClick={()=>setLayoutOpen(true)}><Sparkles size={17}/> Arrange Best Layout</button>
+          <button className="carousel-button" onClick={()=>carouselRef.current?.click()}><Layers3 size={17}/> Add Carousel</button>
+          <input ref={carouselRef} hidden type="file" multiple accept="image/*" onChange={e=>{addFiles(e.target.files,true);e.currentTarget.value="";}}/>
           <button className="primary" onClick={()=>fileRef.current?.click()}><Plus size={17}/> Upload Multiple Posts</button>
           <input ref={fileRef} hidden type="file" multiple accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/*" onChange={e=>{addFiles(e.target.files); e.currentTarget.value="";}}/>
         </div>
@@ -430,26 +509,30 @@ function App(){
       </div>
     </div>}
 
-    {selected && <Editor post={selected} onClose={()=>setSelected(null)} onUpdate={update} onDelete={()=>remove(selected.id)} onAddCarousel={fs=>{
-      if(!fs?.length)return; const m=[...fs].map(f=>({id:uid(),url:URL.createObjectURL(f),name:f.name}));
-      update({...selected,media:[...selected.media,...m],kind:"carousel"});
-    }}/>}
+    {selected && <Editor post={selected} onClose={()=>setSelected(null)} onUpdate={update} onDelete={()=>remove(selected.id)}
+      onAddCarousel={fs=>addCarouselMedia(selected.id,fs)}
+      onDeleteMedia={mediaId=>deleteMedia(selected.id,mediaId)}
+      onAddComment={(author,body)=>addComment(selected.id,author,body)}
+      onDeleteComment={commentId=>deleteComment(selected.id,commentId)}/>}
   </div>
 }
 
-function Editor({post,onClose,onUpdate,onDelete,onAddCarousel}:{post:Post,onClose:()=>void,onUpdate:(p:Post)=>void,onDelete:()=>void,onAddCarousel:(f:FileList|null)=>void}){
+function Editor({post,onClose,onUpdate,onDelete,onAddCarousel,onDeleteMedia,onAddComment,onDeleteComment}:{post:Post,onClose:()=>void,onUpdate:(p:Post)=>void,onDelete:()=>void,onAddCarousel:(f:FileList|null)=>void,onDeleteMedia:(id:string)=>void,onAddComment:(author:string,body:string)=>void,onDeleteComment:(id:string)=>void}){
   const [comment,setComment]=useState("");
+  const [commentAuthor,setCommentAuthor]=useState("Lucas");
   return <div className="drawer">
     <div className="drawer-head"><div><span>CONTENT</span><h2>{post.kind==="carousel"?"Carousel":"Post"}</h2></div><button onClick={onClose}><X/></button></div>
     <div className="slides">
-      {post.media.map((m,i)=><div className="slide" key={m.id}><img src={m.url}/><span>{i+1}</span></div>)}
-      <label className="slide add"><Plus/><input hidden type="file" multiple accept="image/*" onChange={e=>onAddCarousel(e.target.files)}/></label>
+      {post.media.map((m,i)=><div className="slide" key={m.id}><img src={m.url}/><span>{i+1}</span>{post.media.length>1&&<button className="slide-delete" onClick={()=>onDeleteMedia(m.id)} title="Delete image"><Trash2 size={13}/></button>}</div>)}
+      <label className="slide add" title="Add images to carousel"><Plus/><input hidden type="file" multiple accept="image/*" onChange={e=>{onAddCarousel(e.target.files);e.currentTarget.value=""}}/></label>
     </div>
     <label>Caption<textarea value={post.caption} placeholder="Write the caption..." onChange={e=>onUpdate({...post,caption:e.target.value})}/></label>
     <div className="row"><label>Date<input type="date" value={post.date} onChange={e=>onUpdate({...post,date:e.target.value})}/></label><label>Time<input type="time" value={post.time} onChange={e=>onUpdate({...post,time:e.target.value})}/></label></div>
-    <div className="row"><label>Status<select value={post.status} onChange={e=>onUpdate({...post,status:e.target.value as Status})}>{["Idea","Production","In Review","Approved","Published"].map(s=><option>{s}</option>)}</select></label><label>Assignee<select value={post.assignee} onChange={e=>onUpdate({...post,assignee:e.target.value})}>{["Lucas","Bruna","Katia"].map(s=><option>{s}</option>)}</select></label></div>
-    <div className="comments"><h3>Comments <span>{post.comments.length}</span></h3>{post.comments.map((c,i)=><div className="comment" key={i}><b>{i%2?"Bruna":"Lucas"}</b><p>{c}</p></div>)}
-      <div className="commentbox"><input value={comment} onChange={e=>setComment(e.target.value)} placeholder="Add a comment..."/><button onClick={()=>{if(comment.trim()){onUpdate({...post,comments:[...post.comments,comment.trim()]});setComment("")}}}>Send</button></div>
+    <div className="row"><label>Status<select value={post.status} onChange={e=>onUpdate({...post,status:e.target.value as Status})}>{["Idea","Production","In Review","Approved","Published"].map(x=><option key={x}>{x}</option>)}</select></label><label>Assignee<select value={post.assignee} onChange={e=>onUpdate({...post,assignee:e.target.value})}>{["","Lucas","Bruna","Katia"].map(x=><option key={x} value={x}>{x||"Unassigned"}</option>)}</select></label></div>
+    <div className="comments"><h3>Comments <span>{post.comments.length}</span></h3>
+      {post.comments.map(c=><div className="comment" key={c.id}><div className="comment-head"><b>{c.author}</b><button onClick={()=>onDeleteComment(c.id)} title="Delete comment"><Trash2 size={13}/></button></div><p>{c.body}</p></div>)}
+      <div className="comment-author"><label>Comment as<select value={commentAuthor} onChange={e=>setCommentAuthor(e.target.value)}>{["Lucas","Bruna","Katia"].map(x=><option key={x}>{x}</option>)}</select></label></div>
+      <div className="commentbox"><input value={comment} onChange={e=>setComment(e.target.value)} placeholder={`Comment as ${commentAuthor}...`}/><button onClick={()=>{if(comment.trim()){onAddComment(commentAuthor,comment);setComment("")}}}>Send</button></div>
     </div>
     <button className="delete" onClick={onDelete}><Trash2 size={16}/> Delete content</button>
   </div>
